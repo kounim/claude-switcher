@@ -24,14 +24,14 @@ source ~/.bashrc
 
 ## Setup
 
-Do this once per account:
+Do this once per account. Profile names are arbitrary — use whatever you like.
 
 ```bash
 # Log in to account A inside Claude Code (/login), then:
 claude-switch save personal
 
 # Log in to account B inside Claude Code (/login), then:
-claude-switch save teams
+claude-switch save work
 ```
 
 ## Usage
