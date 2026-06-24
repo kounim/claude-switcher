@@ -27,27 +27,33 @@ source ~/.bashrc
 Do this once per account. Profile names are arbitrary — use whatever you like.
 
 ```bash
+claude-switch save account_name
+```
+
+ex)
+
+```bash
 # Log in to account A inside Claude Code (/login), then:
-claude-switch save personal
+claude-switch save pro
 
 # Log in to account B inside Claude Code (/login), then:
-claude-switch save work
+claude-switch save teams
 ```
 
 ## Usage
 
 ```bash
-claude-switch personal      # switch to personal account
-claude-switch teams         # switch to teams account
-claude-switch status        # show all profiles and usage %
+claude-switch account_name          # switch to saved account
+claude-switch status                # show all profiles and usage %
+claude-switch delete account_name   # remove a saved profile
 ```
 
 **`status` output:**
 ```
-active profile : personal
+active profile : pro
 config account : you@gmail.com
-  - personal   config:o  cred:o  5h: 15%  7d: 24%
-  - teams      config:o  cred:o  5h:  0%  7d: 10%
+  - pro         config:o  cred:o  5h: 15%  7d: 24%
+  - teams       config:o  cred:o  5h:  0%  7d: 10%
 ```
 
 `5h` = 5-hour rolling window usage, `7d` = 7-day usage.

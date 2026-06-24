@@ -53,12 +53,13 @@ except Exception as e:
 " "$resp" 2>/dev/null || printf "cred:o  usage:?"
 }
 
-[ $# -ge 1 ] || { echo "usage: claude-switch [personal|teams|status|save <name>]"; exit 1; }
+[ $# -ge 1 ] || { echo "usage: claude-switch <profile>|status|save <name>|delete <name>"; exit 1; }
 cmd="$1"
 
 # Snapshot the currently logged-in account under an arbitrary profile name (for bootstrapping a new machine)
 if [ "$cmd" = save ]; then
   name="${2:-}"; [ -n "$name" ] || die "usage: claude-switch save <name>"
+  case "$name" in save|status|delete) die "reserved name: $name";; esac
   [ -f "$CONF" ] || die "config not found: $CONF"
   [ -f "$CRED" ] || die "credentials not found: run 'claude' and /login first"
   # Resolve symlink to real file if needed
@@ -67,6 +68,15 @@ if [ "$cmd" = save ]; then
   cp -f "$CRED" "$CRED.$name"; chmod 600 "$CRED.$name"
   echo "$name" > "$MARK"
   echo "✓ current account ($(email_of "$CONF")) saved as profile [$name]"
+  exit 0
+fi
+
+if [ "$cmd" = delete ]; then
+  name="${2:-}"; [ -n "$name" ] || die "usage: claude-switch delete <name>"
+  [ "$(active)" = "$name" ] && die "cannot delete the active profile; switch to another profile first"
+  profiles | grep -Fqx "$name" || die "no such profile: $name"
+  rm -f "$CONF.$name" "$CRED.$name"
+  echo "✓ profile [$name] deleted"
   exit 0
 fi
 
