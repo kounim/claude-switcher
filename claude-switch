@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# claude-switch — Claude Code 계정 프로필 전환기 (복사 기반, 심볼릭 링크 미사용)
+#
+# 계정 신원은 두 파일이 짝으로 맞아야 함:
+#   ~/.claude.json            -> oauthAccount (이메일/계정UUID/조직UUID)
+#   ~/.claude/.credentials.json -> 실제 OAuth 토큰 + organizationUuid
+# 이 스크립트는 두 파일을 프로필별로 복사 보관하고, 전환 시 짝으로 스왑한다.
+# 전환 직전, 현재 살아있는 상태를 활성 프로필로 역저장하여 갱신된 토큰을 보존한다.
+set -euo pipefail
+
+CRED="$HOME/.claude/.credentials.json"
+CONF="$HOME/.claude.json"
+MARK="$HOME/.claude/.active-profile"
+
+die(){ echo "✗ $*" >&2; exit 1; }
+active(){ [ -f "$MARK" ] && cat "$MARK" || echo unknown; }
+# 저장된 프로필 = 존재하는 .claude.json.<name> 들
+profiles(){ for f in "$CONF".*; do [ -f "$f" ] || continue; b="${f##*/.claude.json.}"; case "$b" in real.*) ;; *) echo "$b";; esac; done; }
+email_of(){
+  python3 - "$1" <<'PY' 2>/dev/null || echo '?'
+import json, sys
+print(json.load(open(sys.argv[1])).get('oauthAccount', {}).get('emailAddress', '?'))
+PY
+}
+usage_of(){
+  local cred_file="$1"
+  [ -f "$cred_file" ] || { printf "cred:x"; return; }
+  local token resp
+  token=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d.get('claudeAiOauth', {}).get('accessToken', ''))
+" "$cred_file" 2>/dev/null)
+  [ -n "$token" ] || { printf "cred:o  usage:?"; return; }
+  resp=$(curl -s --max-time 5 "https://claude.ai/api/oauth/usage" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -H "User-Agent: Claude-Code/1.0" \
+    -H "X-Frame-Surface: code" \
+    --cookie "sessionKey=$token" 2>/dev/null)
+  python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    fh = (d.get('five_hour') or {}).get('utilization', '?')
+    sd = (d.get('seven_day') or {}).get('utilization', '?')
+    fh_s = f'{int(fh):>3}%' if isinstance(fh, (int,float)) else ' ?%'
+    sd_s = f'{int(sd):>3}%' if isinstance(sd, (int,float)) else ' ?%'
+    print(f'cred:o  5h:{fh_s}  7d:{sd_s}')
+except Exception as e:
+    print('cred:o  usage:?')
+" "$resp" 2>/dev/null || printf "cred:o  usage:?"
+}
+
+[ $# -ge 1 ] || { echo "usage: claude-switch [personal|teams|status|save <name>]"; exit 1; }
+cmd="$1"
+
+# 현재 로그인된 계정을 임의 이름의 프로필로 스냅샷 (새 머신 부트스트랩용)
+if [ "$cmd" = save ]; then
+  name="${2:-}"; [ -n "$name" ] || die "usage: claude-switch save <name>"
+  [ -f "$CONF" ] || die "config 없음: $CONF"
+  [ -f "$CRED" ] || die "credentials 없음: 먼저 'claude' 실행 후 /login 하세요"
+  # 심볼릭 링크면 실파일화
+  if [ -L "$CONF" ]; then real=$(readlink -f "$CONF"); cp -f "$real" "$CONF.real.$$"; rm -f "$CONF"; mv "$CONF.real.$$" "$CONF"; fi
+  cp -f "$CONF" "$CONF.$name"; chmod 600 "$CONF.$name"
+  cp -f "$CRED" "$CRED.$name"; chmod 600 "$CRED.$name"
+  echo "$name" > "$MARK"
+  echo "✓ 현재 계정($(email_of "$CONF")) → 프로필 [$name] 로 저장됨"
+  exit 0
+fi
+
+if [ "$cmd" = status ]; then
+  cur=$(active)
+  echo "active profile : $cur"
+  echo "config account : $(email_of "$CONF")"
+  for p in $(profiles); do
+    conf_mark="$([ -f "$CONF.$p" ] && echo o || echo x)"
+    if [ -f "$CRED.$p" ]; then
+      [ "$p" = "$cur" ] && cred_src="$CRED" || cred_src="$CRED.$p"
+      printf '  - %-10s config:%s  %s\n' "$p" "$conf_mark" "$(usage_of "$cred_src")"
+    else
+      printf '  - %-10s config:%s  cred:x\n' "$p" "$conf_mark"
+    fi
+  done
+  exit 0
+fi
+
+profiles | grep -Fqx "$cmd" || die "unknown profile: $cmd (저장된 프로필: $(profiles | tr '\n' ' '))"
+target="$cmd"
+
+# 동시 실행 방지
+exec 9>"$HOME/.claude/.switch.lock"
+flock -n 9 || die "다른 claude-switch가 이미 실행 중입니다"
+
+# 1) Claude Code 실행 중이면 거부 (종료 시 .claude.json 덮어쓰기로 스왑이 날아감)
+if pgrep -x claude >/dev/null 2>&1 || pgrep -af node 2>/dev/null | grep -q "[c]laude"; then
+  die "Claude Code가 실행 중입니다. 완전히 종료한 뒤 다시 실행하세요."
+fi
+
+# 2) config가 심볼릭 링크면 실파일로 1회 전환 (링크 의존 제거)
+if [ -L "$CONF" ]; then
+  real=$(readlink -f "$CONF"); cp -f "$real" "$CONF.real.$$"; rm -f "$CONF"; mv "$CONF.real.$$" "$CONF"
+fi
+
+# 3) 현재 살아있는 상태를 활성 프로필로 역저장 (갱신된 토큰/설정 보존)
+cur=$(active)
+if [ "$cur" != unknown ] && [ "$cur" != "$target" ]; then
+  cp -f "$CONF" "$CONF.$cur"
+  [ -f "$CRED" ] && cp -f "$CRED" "$CRED.$cur"
+fi
+
+# 4) 타깃 프로필 로드
+[ -f "$CONF.$target" ] || die "missing $CONF.$target"
+cp -f "$CONF.$target" "$CONF"
+if [ -f "$CRED.$target" ]; then
+  cp -f "$CRED.$target" "$CRED"; chmod 600 "$CRED"
+  echo "✓ [$target] 로 전환됨  ($(email_of "$CONF"))"
+else
+  rm -f "$CRED"
+  echo "✓ config는 [$target]로 전환됨. 저장된 토큰 없음 → Claude 실행 후 /login 하세요."
+  echo "  (로그인 후 다음번 전환 시 토큰이 자동 저장됩니다)"
+fi
+echo "$target" > "$MARK"
