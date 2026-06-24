@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# claude-switch — Claude Code 계정 프로필 전환기 (복사 기반, 심볼릭 링크 미사용)
+# claude-switch — Claude Code account profile switcher (copy-based, no symlinks)
 #
-# 계정 신원은 두 파일이 짝으로 맞아야 함:
-#   ~/.claude.json            -> oauthAccount (이메일/계정UUID/조직UUID)
-#   ~/.claude/.credentials.json -> 실제 OAuth 토큰 + organizationUuid
-# 이 스크립트는 두 파일을 프로필별로 복사 보관하고, 전환 시 짝으로 스왑한다.
-# 전환 직전, 현재 살아있는 상태를 활성 프로필로 역저장하여 갱신된 토큰을 보존한다.
+# Account identity is defined by a pair of files that must match:
+#   ~/.claude.json              -> oauthAccount (email / account UUID / org UUID)
+#   ~/.claude/.credentials.json -> actual OAuth token + organizationUuid
+# This script keeps per-profile copies of both files and swaps them as a pair on switch.
+# Before switching, it writes the current live state back to the active profile
+# so that any refreshed tokens are preserved.
 set -euo pipefail
 
 CRED="$HOME/.claude/.credentials.json"
@@ -14,7 +15,7 @@ MARK="$HOME/.claude/.active-profile"
 
 die(){ echo "✗ $*" >&2; exit 1; }
 active(){ [ -f "$MARK" ] && cat "$MARK" || echo unknown; }
-# 저장된 프로필 = 존재하는 .claude.json.<name> 들
+# Saved profiles = existing .claude.json.<name> files
 profiles(){ for f in "$CONF".*; do [ -f "$f" ] || continue; b="${f##*/.claude.json.}"; case "$b" in real.*) ;; *) echo "$b";; esac; done; }
 email_of(){
   python3 - "$1" <<'PY' 2>/dev/null || echo '?'
@@ -55,17 +56,17 @@ except Exception as e:
 [ $# -ge 1 ] || { echo "usage: claude-switch [personal|teams|status|save <name>]"; exit 1; }
 cmd="$1"
 
-# 현재 로그인된 계정을 임의 이름의 프로필로 스냅샷 (새 머신 부트스트랩용)
+# Snapshot the currently logged-in account under an arbitrary profile name (for bootstrapping a new machine)
 if [ "$cmd" = save ]; then
   name="${2:-}"; [ -n "$name" ] || die "usage: claude-switch save <name>"
-  [ -f "$CONF" ] || die "config 없음: $CONF"
-  [ -f "$CRED" ] || die "credentials 없음: 먼저 'claude' 실행 후 /login 하세요"
-  # 심볼릭 링크면 실파일화
+  [ -f "$CONF" ] || die "config not found: $CONF"
+  [ -f "$CRED" ] || die "credentials not found: run 'claude' and /login first"
+  # Resolve symlink to real file if needed
   if [ -L "$CONF" ]; then real=$(readlink -f "$CONF"); cp -f "$real" "$CONF.real.$$"; rm -f "$CONF"; mv "$CONF.real.$$" "$CONF"; fi
   cp -f "$CONF" "$CONF.$name"; chmod 600 "$CONF.$name"
   cp -f "$CRED" "$CRED.$name"; chmod 600 "$CRED.$name"
   echo "$name" > "$MARK"
-  echo "✓ 현재 계정($(email_of "$CONF")) → 프로필 [$name] 로 저장됨"
+  echo "✓ current account ($(email_of "$CONF")) saved as profile [$name]"
   exit 0
 fi
 
@@ -85,39 +86,39 @@ if [ "$cmd" = status ]; then
   exit 0
 fi
 
-profiles | grep -Fqx "$cmd" || die "unknown profile: $cmd (저장된 프로필: $(profiles | tr '\n' ' '))"
+profiles | grep -Fqx "$cmd" || die "unknown profile: $cmd (saved profiles: $(profiles | tr '\n' ' '))"
 target="$cmd"
 
-# 동시 실행 방지
+# Prevent concurrent execution
 exec 9>"$HOME/.claude/.switch.lock"
-flock -n 9 || die "다른 claude-switch가 이미 실행 중입니다"
+flock -n 9 || die "another claude-switch is already running"
 
-# 1) Claude Code 실행 중이면 거부 (종료 시 .claude.json 덮어쓰기로 스왑이 날아감)
+# 1) Refuse to switch if Claude Code is running (it overwrites .claude.json on exit, clobbering the swap)
 if pgrep -x claude >/dev/null 2>&1 || pgrep -af node 2>/dev/null | grep -q "[c]laude"; then
-  die "Claude Code가 실행 중입니다. 완전히 종료한 뒤 다시 실행하세요."
+  die "Claude Code is running. Quit it fully before switching profiles."
 fi
 
-# 2) config가 심볼릭 링크면 실파일로 1회 전환 (링크 의존 제거)
+# 2) If config is a symlink, replace it with the real file (removes symlink dependency)
 if [ -L "$CONF" ]; then
   real=$(readlink -f "$CONF"); cp -f "$real" "$CONF.real.$$"; rm -f "$CONF"; mv "$CONF.real.$$" "$CONF"
 fi
 
-# 3) 현재 살아있는 상태를 활성 프로필로 역저장 (갱신된 토큰/설정 보존)
+# 3) Write the current live state back to the active profile (preserves refreshed tokens/settings)
 cur=$(active)
 if [ "$cur" != unknown ] && [ "$cur" != "$target" ]; then
   cp -f "$CONF" "$CONF.$cur"
   [ -f "$CRED" ] && cp -f "$CRED" "$CRED.$cur"
 fi
 
-# 4) 타깃 프로필 로드
+# 4) Load the target profile
 [ -f "$CONF.$target" ] || die "missing $CONF.$target"
 cp -f "$CONF.$target" "$CONF"
 if [ -f "$CRED.$target" ]; then
   cp -f "$CRED.$target" "$CRED"; chmod 600 "$CRED"
-  echo "✓ [$target] 로 전환됨  ($(email_of "$CONF"))"
+  echo "✓ switched to [$target]  ($(email_of "$CONF"))"
 else
   rm -f "$CRED"
-  echo "✓ config는 [$target]로 전환됨. 저장된 토큰 없음 → Claude 실행 후 /login 하세요."
-  echo "  (로그인 후 다음번 전환 시 토큰이 자동 저장됩니다)"
+  echo "✓ config switched to [$target]. No saved token — run claude and /login."
+  echo "  (the token will be saved automatically on the next profile switch)"
 fi
 echo "$target" > "$MARK"
