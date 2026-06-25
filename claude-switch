@@ -26,31 +26,76 @@ PY
 usage_of(){
   local cred_file="$1"
   [ -f "$cred_file" ] || { printf "cred:x"; return; }
-  local token resp
-  token=$(python3 -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-print(d.get('claudeAiOauth', {}).get('accessToken', ''))
-" "$cred_file" 2>/dev/null)
-  [ -n "$token" ] || { printf "cred:o  usage:?"; return; }
-  resp=$(curl -s --max-time 5 "https://claude.ai/api/oauth/usage" \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    -H "User-Agent: Claude-Code/1.0" \
-    -H "X-Frame-Surface: code" \
-    --cookie "sessionKey=$token" 2>/dev/null)
-  python3 -c "
-import json, sys
-try:
-    d = json.loads(sys.argv[1])
-    fh = (d.get('five_hour') or {}).get('utilization', '?')
-    sd = (d.get('seven_day') or {}).get('utilization', '?')
-    fh_s = f'{int(fh):>3}%' if isinstance(fh, (int,float)) else ' ?%'
-    sd_s = f'{int(sd):>3}%' if isinstance(sd, (int,float)) else ' ?%'
-    print(f'cred:o  5h:{fh_s}  7d:{sd_s}')
-except Exception as e:
+  python3 - "$cred_file" <<'PY' 2>/dev/null || printf "cred:o  usage:?"
+import json, sys, time, urllib.request, urllib.error
+
+REFRESH_URL = 'https://platform.claude.com/v1/oauth/token'
+USAGE_URL   = 'https://claude.ai/api/oauth/usage'
+CLIENT_ID   = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
+
+cred_file = sys.argv[1]
+d = json.load(open(cred_file))
+oauth = d.get('claudeAiOauth', {})
+access_token  = oauth.get('accessToken', '')
+refresh_token = oauth.get('refreshToken', '')
+expires_at    = oauth.get('expiresAt', 0)  # milliseconds
+
+if not access_token:
     print('cred:o  usage:?')
-" "$resp" 2>/dev/null || printf "cred:o  usage:?"
+    sys.exit(0)
+
+# Refresh if expired and we have a refresh token
+if expires_at and time.time() * 1000 > expires_at and refresh_token:
+    req = urllib.request.Request(
+        REFRESH_URL,
+        data=json.dumps({'grant_type': 'refresh_token',
+                         'refresh_token': refresh_token,
+                         'client_id': CLIENT_ID}).encode(),
+        headers={'Content-Type': 'application/json',
+                 'anthropic-version': '2023-06-01',
+                 'User-Agent': 'Claude-Code/1.0'},
+        method='POST'
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            r = json.loads(resp.read())
+        if 'access_token' in r:
+            oauth['accessToken'] = r['access_token']
+            if 'refresh_token' in r:
+                oauth['refreshToken'] = r['refresh_token']
+            if 'expires_in' in r:
+                oauth['expiresAt'] = int((time.time() + r['expires_in']) * 1000)
+            d['claudeAiOauth'] = oauth
+            with open(cred_file, 'w') as f:
+                json.dump(d, f, indent=2)
+            access_token = r['access_token']
+        else:
+            print('cred:o  usage:?')
+            sys.exit(0)
+    except Exception:
+        print('cred:o  usage:?')
+        sys.exit(0)
+
+# Fetch usage
+req = urllib.request.Request(
+    USAGE_URL,
+    headers={'Authorization': f'Bearer {access_token}',
+             'Content-Type': 'application/json',
+             'User-Agent': 'Claude-Code/1.0',
+             'X-Frame-Surface': 'code',
+             'Cookie': f'sessionKey={access_token}'}
+)
+try:
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        u = json.loads(resp.read())
+    fh = (u.get('five_hour') or {}).get('utilization', '?')
+    sd = (u.get('seven_day') or {}).get('utilization', '?')
+    fh_s = f'{int(fh):>3}%' if isinstance(fh, (int, float)) else ' ?%'
+    sd_s = f'{int(sd):>3}%' if isinstance(sd, (int, float)) else ' ?%'
+    print(f'cred:o  5h:{fh_s}  7d:{sd_s}')
+except Exception:
+    print('cred:o  usage:?')
+PY
 }
 
 [ $# -ge 1 ] || { echo "usage: claude-switch <profile>|status|save <name>|delete <name>"; exit 1; }
