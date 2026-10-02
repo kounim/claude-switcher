@@ -1,39 +1,82 @@
 #!/usr/bin/env bash
 # claude-switch — Claude Code account profile switcher (copy-based, no symlinks)
 #
-# Account identity is defined by a pair of files that must match:
-#   ~/.claude.json              -> oauthAccount (email / account UUID / org UUID)
-#   ~/.claude/.credentials.json -> actual OAuth token + organizationUuid
-# This script keeps per-profile copies of both files and swaps them as a pair on switch.
-# Before switching, it writes the current live state back to the active profile
+# Account identity lives in two places:
+#   ~/.claude.json              -> oauthAccount (email / account UUID / org UUID); the rest is shared local state
+#   ~/.claude/.credentials.json -> actual OAuth token
+# Each profile keeps its oauthAccount (~/.claude.json.<name>) and credentials (~/.claude/.credentials.json.<name>).
+# On switch, only oauthAccount is swapped inside ~/.claude.json, so projects/trust/permissions/MCP settings stay shared.
+# Before switching, the live account state is written back to the profile that owns it (matched by account UUID)
 # so that any refreshed tokens are preserved.
 set -euo pipefail
+umask 077
 
 CRED="$HOME/.claude/.credentials.json"
 CONF="$HOME/.claude.json"
 MARK="$HOME/.claude/.active-profile"
+LOCK="$HOME/.claude/.switch.lock"
 
 die(){ echo "✗ $*" >&2; exit 1; }
 active(){ [ -f "$MARK" ] && cat "$MARK" || echo unknown; }
-# Saved profiles = existing .claude.json.<name> files
-profiles(){ for f in "$CONF".*; do [ -f "$f" ] || continue; b="${f##*/.claude.json.}"; case "$b" in real.*) ;; *) echo "$b";; esac; done; }
-email_of(){
-  python3 - "$1" <<'PY' 2>/dev/null || echo '?'
-import json, sys
-print(json.load(open(sys.argv[1])).get('oauthAccount', {}).get('emailAddress', '?'))
+valid_name(){ [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]; }
+copy_atomic(){ cp -f "$1" "$2.tmp.$$" && mv -f "$2.tmp.$$" "$2"; }
+# Saved profiles = .claude.json.<name> with a matching .credentials.json.<name>
+profiles(){ for f in "$CONF".*; do [ -f "$f" ] || continue; b="${f##*/.claude.json.}"; valid_name "$b" && [ -f "$CRED.$b" ] && echo "$b"; done; return 0; }
+
+json_op(){
+  python3 - "$@" <<'PY'
+import json, os, sys
+
+def load(p):
+    with open(p) as f:
+        return json.load(f)
+
+def dump(p, d):
+    tmp = f'{p}.tmp.{os.getpid()}'
+    with open(tmp, 'w') as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, p)
+
+op, *a = sys.argv[1:]
+if op == 'email':      # email <conf>
+    print(load(a[0]).get('oauthAccount', {}).get('emailAddress', '?'))
+elif op == 'uuid':     # uuid <conf>
+    print(load(a[0]).get('oauthAccount', {}).get('accountUuid', ''))
+elif op == 'extract':  # extract <live conf> <profile conf>: store live oauthAccount as the profile
+    acct = load(a[0]).get('oauthAccount')
+    if not acct:
+        sys.exit(f'no oauthAccount in {a[0]}')
+    dump(a[1], {'oauthAccount': acct})
+elif op == 'apply':    # apply <profile conf> <live conf>: put profile oauthAccount into live config
+    acct = load(a[0]).get('oauthAccount')
+    if not acct:
+        sys.exit(f'no oauthAccount in {a[0]}')
+    d = load(a[1])
+    d['oauthAccount'] = acct
+    dump(a[1], d)
 PY
 }
+email_of(){ json_op email "$1" 2>/dev/null || echo '?'; }
+uuid_of(){ json_op uuid "$1" 2>/dev/null || true; }
+profile_of_uuid(){
+  local u="$1" p
+  [ -n "$u" ] || return 1
+  for p in $(profiles); do [ "$(uuid_of "$CONF.$p")" = "$u" ] && { echo "$p"; return 0; }; done
+  return 1
+}
+claude_running(){ pgrep -x claude >/dev/null 2>&1 || pgrep -f '@anthropic-ai/claude-code' >/dev/null 2>&1; }
+
 usage_of(){
-  local cred_file="$1"
+  local cred_file="$1" mode="${2:-refresh}"
   [ -f "$cred_file" ] || { printf "cred:x"; return; }
-  python3 - "$cred_file" <<'PY' 2>/dev/null || printf "cred:o  usage:?"
-import json, sys, time, urllib.request, urllib.error
+  python3 - "$cred_file" "$mode" <<'PY' 2>/dev/null || printf "cred:o  usage:?"
+import json, os, sys, time, urllib.request, urllib.error
 
 REFRESH_URL = 'https://platform.claude.com/v1/oauth/token'
 USAGE_URL   = 'https://claude.ai/api/oauth/usage'
 CLIENT_ID   = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 
-cred_file = sys.argv[1]
+cred_file, mode = sys.argv[1], sys.argv[2]
 d = json.load(open(cred_file))
 oauth = d.get('claudeAiOauth', {})
 access_token  = oauth.get('accessToken', '')
@@ -44,8 +87,11 @@ if not access_token:
     print('cred:o  usage:?')
     sys.exit(0)
 
-# Refresh if expired and we have a refresh token
-if expires_at and time.time() * 1000 > expires_at and refresh_token:
+if expires_at and time.time() * 1000 > expires_at:
+    # Never refresh the live credentials: rotating the refresh token would invalidate the one Claude Code holds
+    if mode != 'refresh' or not refresh_token:
+        print('cred:o  usage:? (expired)')
+        sys.exit(0)
     req = urllib.request.Request(
         REFRESH_URL,
         data=json.dumps({'grant_type': 'refresh_token',
@@ -66,8 +112,10 @@ if expires_at and time.time() * 1000 > expires_at and refresh_token:
             if 'expires_in' in r:
                 oauth['expiresAt'] = int((time.time() + r['expires_in']) * 1000)
             d['claudeAiOauth'] = oauth
-            with open(cred_file, 'w') as f:
+            tmp = f'{cred_file}.tmp.{os.getpid()}'
+            with open(tmp, 'w') as f:
                 json.dump(d, f, indent=2)
+            os.replace(tmp, cred_file)
             access_token = r['access_token']
         else:
             print('cred:o  usage:?')
@@ -101,16 +149,19 @@ PY
 [ $# -ge 1 ] || { echo "usage: claude-switch <profile>|status|save <name>|delete <name>"; exit 1; }
 cmd="$1"
 
-# Snapshot the currently logged-in account under an arbitrary profile name (for bootstrapping a new machine)
+# Prevent concurrent execution
+exec 9>"$LOCK"
+flock -n 9 || die "another claude-switch is already running"
+
+# Snapshot the currently logged-in account under an arbitrary profile name
 if [ "$cmd" = save ]; then
   name="${2:-}"; [ -n "$name" ] || die "usage: claude-switch save <name>"
+  valid_name "$name" || die "invalid name: $name (use letters, digits, _ and -)"
   case "$name" in save|status|delete) die "reserved name: $name";; esac
   [ -f "$CONF" ] || die "config not found: $CONF"
   [ -f "$CRED" ] || die "credentials not found: run 'claude' and /login first"
-  # Resolve symlink to real file if needed
-  if [ -L "$CONF" ]; then real=$(readlink -f "$CONF"); cp -f "$real" "$CONF.real.$$"; rm -f "$CONF"; mv "$CONF.real.$$" "$CONF"; fi
-  cp -f "$CONF" "$CONF.$name"; chmod 600 "$CONF.$name"
-  cp -f "$CRED" "$CRED.$name"; chmod 600 "$CRED.$name"
+  json_op extract "$CONF" "$CONF.$name"
+  copy_atomic "$CRED" "$CRED.$name"
   echo "$name" > "$MARK"
   echo "✓ current account ($(email_of "$CONF")) saved as profile [$name]"
   exit 0
@@ -118,8 +169,8 @@ fi
 
 if [ "$cmd" = delete ]; then
   name="${2:-}"; [ -n "$name" ] || die "usage: claude-switch delete <name>"
-  [ "$(active)" = "$name" ] && die "cannot delete the active profile; switch to another profile first"
   profiles | grep -Fqx "$name" || die "no such profile: $name"
+  [ "$(active)" = "$name" ] && die "cannot delete the active profile; switch to another profile first"
   rm -f "$CONF.$name" "$CRED.$name"
   echo "✓ profile [$name] deleted"
   exit 0
@@ -130,12 +181,10 @@ if [ "$cmd" = status ]; then
   echo "active profile : $cur"
   echo "config account : $(email_of "$CONF")"
   for p in $(profiles); do
-    conf_mark="$([ -f "$CONF.$p" ] && echo o || echo x)"
-    if [ -f "$CRED.$p" ]; then
-      [ "$p" = "$cur" ] && cred_src="$CRED" || cred_src="$CRED.$p"
-      printf '  - %-10s config:%s  %s\n' "$p" "$conf_mark" "$(usage_of "$cred_src")"
+    if [ "$p" = "$cur" ]; then
+      printf '  * %-10s %s\n' "$p" "$(usage_of "$CRED" norefresh)"
     else
-      printf '  - %-10s config:%s  cred:x\n' "$p" "$conf_mark"
+      printf '  - %-10s %s\n' "$p" "$(usage_of "$CRED.$p")"
     fi
   done
   exit 0
@@ -144,36 +193,27 @@ fi
 profiles | grep -Fqx "$cmd" || die "unknown profile: $cmd (saved profiles: $(profiles | tr '\n' ' '))"
 target="$cmd"
 
-# Prevent concurrent execution
-exec 9>"$HOME/.claude/.switch.lock"
-flock -n 9 || die "another claude-switch is already running"
+# 1) Refuse to switch if Claude Code is running (it rewrites .claude.json, clobbering the swap)
+claude_running && die "Claude Code is running. Quit it fully before switching profiles."
+[ -f "$CONF" ] || die "config not found: $CONF"
 
-# 1) Refuse to switch if Claude Code is running (it overwrites .claude.json on exit, clobbering the swap)
-if pgrep -x claude >/dev/null 2>&1 || pgrep -af node 2>/dev/null | grep -q "[c]laude"; then
-  die "Claude Code is running. Quit it fully before switching profiles."
+# 2) Write the live account back to the profile that owns it (preserves refreshed tokens)
+live_uuid=$(uuid_of "$CONF")
+owner=""
+if [ -n "$live_uuid" ]; then
+  owner=$(profile_of_uuid "$live_uuid") \
+    || die "current account ($(email_of "$CONF")) is not saved in any profile; run 'claude-switch save <name>' first"
+  json_op extract "$CONF" "$CONF.$owner"
+  [ -f "$CRED" ] && copy_atomic "$CRED" "$CRED.$owner"
+fi
+if [ "$owner" = "$target" ]; then
+  echo "$target" > "$MARK"
+  echo "✓ already on [$target]  ($(email_of "$CONF"))"
+  exit 0
 fi
 
-# 2) If config is a symlink, replace it with the real file (removes symlink dependency)
-if [ -L "$CONF" ]; then
-  real=$(readlink -f "$CONF"); cp -f "$real" "$CONF.real.$$"; rm -f "$CONF"; mv "$CONF.real.$$" "$CONF"
-fi
-
-# 3) Write the current live state back to the active profile (preserves refreshed tokens/settings)
-cur=$(active)
-if [ "$cur" != unknown ] && [ "$cur" != "$target" ]; then
-  cp -f "$CONF" "$CONF.$cur"
-  [ -f "$CRED" ] && cp -f "$CRED" "$CRED.$cur"
-fi
-
-# 4) Load the target profile
-[ -f "$CONF.$target" ] || die "missing $CONF.$target"
-cp -f "$CONF.$target" "$CONF"
-if [ -f "$CRED.$target" ]; then
-  cp -f "$CRED.$target" "$CRED"; chmod 600 "$CRED"
-  echo "✓ switched to [$target]  ($(email_of "$CONF"))"
-else
-  rm -f "$CRED"
-  echo "✓ config switched to [$target]. No saved token — run claude and /login."
-  echo "  (the token will be saved automatically on the next profile switch)"
-fi
+# 3) Load the target account (only oauthAccount + credentials; all other settings stay as they are)
+json_op apply "$CONF.$target" "$CONF"
+copy_atomic "$CRED.$target" "$CRED"
 echo "$target" > "$MARK"
+echo "✓ switched to [$target]  ($(email_of "$CONF"))"

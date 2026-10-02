@@ -2,7 +2,7 @@
 
 A minimal bash script to switch between multiple Claude Code accounts.
 
-No dependencies beyond `bash`, `python3`, and `curl`.
+No dependencies beyond `bash` and `python3`.
 
 ## Install
 
@@ -52,11 +52,11 @@ claude-switch delete account_name   # remove a saved profile
 ```
 active profile : pro
 config account : you@gmail.com
-  - pro         config:o  cred:o  5h: 15%  7d: 24%
-  - teams       config:o  cred:o  5h:  0%  7d: 10%
+  * pro        cred:o  5h: 15%  7d: 24%
+  - teams      cred:o  5h:  0%  7d: 10%
 ```
 
-`5h` = 5-hour rolling window usage, `7d` = 7-day usage.
+`5h` = 5-hour rolling window usage, `7d` = 7-day usage. `*` marks the active profile.
 
 ## How it works
 
@@ -67,6 +67,8 @@ Claude Code stores account identity in two files:
 | `~/.claude.json` | Account info (email, org UUID) |
 | `~/.claude/.credentials.json` | OAuth token |
 
-`claude-switch` keeps a copy of both files per profile and swaps them as a pair. Before each switch, it writes the current live state back so refreshed tokens are never lost.
+Everything else in `~/.claude.json` (projects, trusted folders, allowed tools, MCP settings) and all of `~/.claude/` (sessions, settings, skills) is shared across accounts.
+
+`claude-switch` keeps each profile's `oauthAccount` and credentials, and on switch replaces only those, so you continue in the exact same environment with a different account. Before each switch, the live account is written back to the profile that owns it (matched by account UUID), so refreshed tokens are never lost. If the live account isn't saved in any profile, the switch is refused until you `save` it.
 
 > **Note:** Claude Code must be fully quit before switching profiles.
