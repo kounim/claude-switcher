@@ -146,8 +146,24 @@ except Exception:
 PY
 }
 
-[ $# -ge 1 ] || { echo "usage: claude-switch <profile>|status|save <name>|delete <name>"; exit 1; }
+usage(){
+  cat <<EOF
+usage: claude-switch <command>
+
+commands:
+  <profile>       switch to a saved profile (Claude Code must be quit first)
+  status          show saved profiles and 5h / 7d usage (* = active)
+  save <name>     save the currently logged-in account as a profile
+  delete <name>   delete a saved profile (not the active one)
+  help, -h        show this help
+
+saved profiles: $(profiles | tr '\n' ' ')
+EOF
+}
+
+[ $# -ge 1 ] || { usage; exit 1; }
 cmd="$1"
+case "$cmd" in help|-h|-help|--help) usage; exit 0;; esac
 
 # Prevent concurrent execution
 exec 9>"$LOCK"
@@ -157,7 +173,7 @@ flock -n 9 || die "another claude-switch is already running"
 if [ "$cmd" = save ]; then
   name="${2:-}"; [ -n "$name" ] || die "usage: claude-switch save <name>"
   valid_name "$name" || die "invalid name: $name (use letters, digits, _ and -)"
-  case "$name" in save|status|delete) die "reserved name: $name";; esac
+  case "$name" in save|status|delete|help) die "reserved name: $name";; esac
   [ -f "$CONF" ] || die "config not found: $CONF"
   [ -f "$CRED" ] || die "credentials not found: run 'claude' and /login first"
   json_op extract "$CONF" "$CONF.$name"

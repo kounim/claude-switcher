@@ -46,6 +46,7 @@ claude-switch save teams
 claude-switch account_name          # switch to saved account
 claude-switch status                # show all profiles and usage %
 claude-switch delete account_name   # remove a saved profile
+claude-switch -h                    # show help
 ```
 
 **`status` output:**
