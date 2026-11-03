@@ -59,11 +59,11 @@ claude-switch --help                # show help
 ```
 active profile : pro
 config account : you@gmail.com
-  * pro        cred:o  5h: 15%  7d: 24%
-  - teams      cred:o  5h:  0%  7d: 10%
+  * pro        cred:o  5h: 15% (reset 20:10)  7d: 24% (reset 11/07 10:00)
+  - teams      cred:o  5h:  0%  7d: 10% (reset 11/04 23:59)
 ```
 
-`5h` = 5-hour rolling window usage, `7d` = 7-day usage. `*` marks the active profile.
+`5h` = 5-hour rolling window usage, `7d` = 7-day usage, each with its reset time in local time (omitted when the API returns none). `*` marks the active profile.
 
 ## How it works
 

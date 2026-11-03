@@ -138,11 +138,17 @@ req = urllib.request.Request(
 try:
     with urllib.request.urlopen(req, timeout=5) as resp:
         u = json.loads(resp.read())
-    fh = (u.get('five_hour') or {}).get('utilization', '?')
-    sd = (u.get('seven_day') or {}).get('utilization', '?')
-    fh_s = f'{int(fh):>3}%' if isinstance(fh, (int, float)) else ' ?%'
-    sd_s = f'{int(sd):>3}%' if isinstance(sd, (int, float)) else ' ?%'
-    print(f'cred:o  5h:{fh_s}  7d:{sd_s}')
+    from datetime import datetime
+    def window(key, fmt):
+        w = u.get(key) or {}
+        v = w.get('utilization')
+        pct = f'{int(v):>3}%' if isinstance(v, (int, float)) else ' ?%'
+        try:  # reset time in local time; omitted if missing (e.g. no usage in the window)
+            reset = datetime.fromisoformat(w['resets_at']).astimezone().strftime(fmt)
+            return f'{pct} (reset {reset})'
+        except Exception:
+            return pct
+    print(f"cred:o  5h:{window('five_hour', '%H:%M')}  7d:{window('seven_day', '%m/%d %H:%M')}")
 except Exception:
     print('cred:o  usage:?')
 PY
