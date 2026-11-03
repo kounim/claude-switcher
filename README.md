@@ -63,7 +63,7 @@ config account : you@gmail.com
   - teams      cred:o  5h:  0%  7d: 10% (reset 11/04 23:59)
 ```
 
-`5h` = 5-hour rolling window usage, `7d` = 7-day usage, each with its reset time in local time (omitted when the API returns none). `*` marks the active profile.
+`5h` = 5-hour rolling window usage, `7d` = 7-day usage, each with its reset time in local time (omitted when the API returns none). `*` marks the active profile. If Claude Code is running, the processes are listed at the end, since a switch would be refused.
 
 ## How it works
 
@@ -78,7 +78,9 @@ Everything else in `~/.claude.json` (projects, trusted folders, allowed tools, M
 
 `claude-switch` keeps each profile's `oauthAccount` and credentials, and on switch replaces only those, so you continue in the exact same environment with a different account. Before each switch, the live account is written back to the profile that owns it (matched by account UUID), so refreshed tokens are never lost. If the live account isn't saved in any profile, the switch is refused until you `--save` it.
 
-> **Note:** Claude Code must be fully quit before switching profiles. A running process keeps the old account in memory and may write it back to `~/.claude.json` / `~/.claude/.credentials.json`, undoing the switch. If any are running, the switch is refused and the detected processes (PID and command line) are listed.
+> **Note:** Claude Code must be fully quit before switching profiles. A running process keeps the old account in memory and may write it back to `~/.claude.json` / `~/.claude/.credentials.json`, undoing the switch. If any are running, the switch is refused and the detected processes are listed with their kind (`session`, `bg session`, `daemon`, `spare`) and working directory. Processes are matched by their executable, so background sessions run by `claude daemon` are caught too.
+
+Background sessions are managed by `claude daemon`, which respawns its spare processes when they are killed. Stop the daemon and all background sessions at once with `claude daemon stop --any` (the switch refusal shows this hint when they are running).
 
 Sometimes a Claude Code process stays alive even though it can't do anything useful — e.g. background agents stopped by a usage limit. Quit it using the listed PID, switch, then pick up the work again:
 

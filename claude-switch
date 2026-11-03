@@ -65,8 +65,71 @@ profile_of_uuid(){
   for p in $(profiles); do [ "$(uuid_of "$CONF.$p")" = "$u" ] && { echo "$p"; return 0; }; done
   return 1
 }
-# Running Claude Code processes as "PID cmdline" lines (empty if none)
-claude_procs(){ { pgrep -ax claude; pgrep -af '@anthropic-ai/claude-code'; } 2>/dev/null | sort -u -k1,1n || true; }
+# Running Claude Code processes, one formatted line each (empty if none).
+# Matched by executable, not process name: background sessions, the daemon and its spares
+# don't run under the name "claude".
+claude_procs(){
+  python3 - <<'PY' 2>/dev/null || true
+import os
+
+def read(pid, name):
+    try:
+        with open(f'/proc/{pid}/{name}', 'rb') as f:
+            return f.read()
+    except OSError:
+        return b''
+
+procs = {}
+for pid in filter(str.isdigit, os.listdir('/proc')):
+    try:
+        exe = os.readlink(f'/proc/{pid}/exe')
+    except OSError:
+        continue
+    args = [a.decode(errors='replace') for a in read(pid, 'cmdline').split(b'\0') if a]
+    native = '/claude/versions/' in exe                      # native install
+    npm = os.path.basename(exe).startswith('node') and any('@anthropic-ai/claude-code' in a for a in args)
+    if not (native or npm):
+        continue
+    stat = read(pid, 'stat').decode(errors='replace')
+    ppid = stat.rsplit(')', 1)[-1].split()[1] if ')' in stat else ''
+    procs[pid] = (ppid, args)
+
+def kind(pid):
+    ppid, args = procs[pid]
+    if 'daemon' in args and 'run' in args:
+        return 'daemon'
+    if 'bg-pty-host' in args:
+        return None                                          # terminal wrapper; its child is listed
+    if 'bg-spare' in args or '--bg-spare' in args:
+        return 'spare'
+    if 'bg-pty-host' in procs.get(ppid, ('', []))[1]:
+        return 'bg session'
+    return 'session'
+
+rows = [(int(p), kind(p)) for p in procs]
+rows = [r for r in rows if r[1]]
+if any(k == 'daemon' for _, k in rows):
+    rows = [r for r in rows if r[1] != 'spare']              # spares go away with the daemon
+for pid, k in sorted(rows):
+    args = procs[str(pid)][1]
+    try:
+        cwd = os.readlink(f'/proc/{pid}/cwd')
+    except OSError:
+        cwd = '?'
+    label = ''
+    if '--name' in args and args.index('--name') + 1 < len(args):
+        label = f"  ({args[args.index('--name') + 1]})"
+    where = '' if k in ('daemon', 'spare') else cwd
+    print(f'{pid:<7} {k:<11} {where}{label}'.rstrip())
+PY
+}
+# Print the running list (indented) and, if the daemon is involved, how to stop it in one go
+show_procs(){
+  echo "$1" | sed 's/^/    /'
+  if echo "$1" | grep -Eq '^[0-9]+ +(daemon|spare|bg session)'; then
+    echo "  background sessions/daemon: stop them all with 'claude daemon stop --any'"
+  fi
+}
 
 usage_of(){
   local cred_file="$1" mode="${2:-refresh}"
@@ -231,6 +294,11 @@ if [ "$cmd" = status ]; then
       printf '  - %-10s %s\n' "$p" "$(usage_of "$CRED.$p")"
     fi
   done
+  procs=$(claude_procs)
+  if [ -n "$procs" ]; then
+    echo "running Claude Code (switch will be refused):"
+    show_procs "$procs"
+  fi
   exit 0
 fi
 
@@ -241,7 +309,7 @@ target="$name"
 procs=$(claude_procs)
 if [ -n "$procs" ]; then
   echo "✗ Claude Code is running. Quit it fully before switching profiles:" >&2
-  echo "$procs" | sed 's/^/    /' >&2
+  show_procs "$procs" >&2
   exit 1
 fi
 [ -f "$CONF" ] || die "config not found: $CONF"
