@@ -138,7 +138,7 @@ usage_of(){
 import json, os, sys, time, urllib.request, urllib.error
 
 REFRESH_URL = 'https://platform.claude.com/v1/oauth/token'
-USAGE_URL   = 'https://claude.ai/api/oauth/usage'
+USAGE_URL   = 'https://api.anthropic.com/api/oauth/usage'  # claude.ai now answers non-browser clients with a Cloudflare challenge
 CLIENT_ID   = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 
 cred_file, mode = sys.argv[1], sys.argv[2]
@@ -194,9 +194,7 @@ req = urllib.request.Request(
     USAGE_URL,
     headers={'Authorization': f'Bearer {access_token}',
              'Content-Type': 'application/json',
-             'User-Agent': 'Claude-Code/1.0',
-             'X-Frame-Surface': 'code',
-             'Cookie': f'sessionKey={access_token}'}
+             'User-Agent': 'Claude-Code/1.0'}
 )
 try:
     with urllib.request.urlopen(req, timeout=5) as resp:
